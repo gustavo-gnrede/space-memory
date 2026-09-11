@@ -385,13 +385,14 @@ def create_app(
             return memory_dict(memory)
 
     @mcp.tool(name="memory_search", description="Search durable memories in the key's Space.")
-    def mcp_memory_search(query: str = "") -> list[dict[str, Any]]:
+    def mcp_memory_search(query: str = "") -> dict[str, Any]:
         space_id, _agent_id = mcp_identity()
         with SessionLocal() as db:
             statement = select(Memory).where(Memory.space_id == space_id)
             for term in query.split():
                 statement = statement.where(Memory.content.ilike(f"%{term}%"))
-            return [memory_dict(item) for item in db.scalars(statement.order_by(Memory.updated_at.desc()))]
+            items = [memory_dict(item) for item in db.scalars(statement.order_by(Memory.updated_at.desc()))]
+            return {"items": items, "total": len(items)}
 
     @mcp.tool(name="events_after", description="Resume confirmed Space events after a durable cursor.")
     def mcp_events_after(cursor: int = 0) -> dict[str, Any]:
