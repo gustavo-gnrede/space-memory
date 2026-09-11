@@ -29,4 +29,5 @@ data/
 *.pid
 *.log
 space-memory-installation.txt
+panel-access.txt
 .hermes/
