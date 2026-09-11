@@ -16,10 +16,14 @@ Space Memory is an open-source shared memory and workspace layer for AI agents. 
 - Idempotent create/update operations
 - Atomic optimistic version checks (`409` on stale writes)
 - Cursor-based event catch-up after restart
+- Per-credential rate limiting (sliding window, `429` + `Retry-After`)
+- Lifecycle CLI (`space-memory start|stop|status|restart`) with PID + cmdline verification
 - MCP Streamable HTTP tools:
   - `memory_remember`
   - `memory_search`
+  - `project_resume`
   - `events_after`
+- Locked dependency graph (`uv.lock`)
 - Animated Canvas dashboard with accessible textual fallback
 
 ## Development
@@ -32,7 +36,32 @@ python -m venv .venv
 .venv/bin/pytest
 ```
 
-Run a local development instance:
+### Configure
+
+Copy `.env.example` to `.env` and set a real pepper (generate once and keep it in
+your secret store):
+
+```bash
+cp .env.example .env
+# set SPACE_MEMORY_TOKEN_PEPPER (e.g. `openssl rand -hex 32`)
+```
+
+The server and CLI auto-load `.env` from the current working directory. See
+[`.env.example`](.env.example) for every supported variable.
+
+### Run via the lifecycle CLI
+
+```bash
+.venv/bin/space-memory start     # background, health-checked, PID tracked
+.venv/bin/space-memory status
+.venv/bin/space-memory stop      # verifies the PID is a Space Memory process first
+.venv/bin/space-memory restart
+```
+
+`stop` never kills by port: it reads the PID file and checks `/proc/<pid>/cmdline`
+before signalling, so an unrelated process that reused a stale PID is left alone.
+
+### Run manually (alternative)
 
 ```bash
 mkdir -p data

@@ -3,7 +3,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from .app import create_app
+
+load_dotenv(Path.cwd() / ".env")
 
 
 def _database_url() -> str:
@@ -40,6 +44,17 @@ def require_pepper() -> str:
     return pepper
 
 
+def _rate_limit_per_minute() -> int:
+    raw = os.environ.get("SPACE_MEMORY_RATE_LIMIT_PER_MINUTE", "300")
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError("SPACE_MEMORY_RATE_LIMIT_PER_MINUTE must be an integer (0 disables rate limiting)")
+    if value < 0:
+        raise RuntimeError("SPACE_MEMORY_RATE_LIMIT_PER_MINUTE must be >= 0")
+    return value
+
+
 pepper = require_pepper()
 database_url = _database_url()
 _ensure_sqlite_parent(database_url)
@@ -48,4 +63,5 @@ app = create_app(
     database_url=database_url,
     token_pepper=pepper,
     bootstrap_tokens=load_bootstrap_tokens(),
+    rate_limit_per_minute=_rate_limit_per_minute(),
 )

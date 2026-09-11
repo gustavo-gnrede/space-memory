@@ -17,6 +17,8 @@ from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
+from .ratelimit import SlidingWindowRateLimiter
+
 
 class Base(DeclarativeBase):
     pass
@@ -107,9 +109,44 @@ def memory_dict(memory: Memory) -> dict[str, Any]:
     }
 
 
+class RateLimitMiddleware:
+    """Pure-ASGI rate limiter that only inspects the request.
+
+    Deliberately does not wrap the response, so streaming (SSE) responses on
+    the MCP endpoint are unaffected.
+    """
+
+    def __init__(self, app, limiter, key_fn, exempt_paths: set[str] | None = None) -> None:
+        self.app = app
+        self.limiter = limiter
+        self.key_fn = key_fn
+        self.exempt_paths = set(exempt_paths or ())
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if scope.get("path", "") in self.exempt_paths:
+            await self.app(scope, receive, send)
+            return
+        allowed, retry_after = self.limiter.check(self.key_fn(scope))
+        if allowed:
+            await self.app(scope, receive, send)
+            return
+        body = b'{"detail":"Rate limit exceeded"}'
+        headers = [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode("ascii")),
+            (b"retry-after", str(int(retry_after) + 1).encode("ascii")),
+        ]
+        await send({"type": "http.response.start", "status": 429, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+
+
 def create_app(
     *, database_url: str = "sqlite:///./space-memory.db", token_pepper: str,
     bootstrap_tokens: dict[str, dict[str, str]] | None = None,
+    rate_limit_per_minute: int = 300,
 ) -> FastAPI:
     engine = create_engine(
         database_url,
@@ -129,6 +166,23 @@ def create_app(
                     db.add(Credential(token_hash=digest, **identity))
 
     app = FastAPI(title="Space Memory", version="0.1.0")
+
+    def rate_limit_key(scope: dict) -> str:
+        headers = dict(scope.get("headers") or [])
+        auth = headers.get(b"authorization", b"").decode("latin-1", "replace")
+        if auth.startswith("Bearer "):
+            digest = hashlib.sha256(f"{token_pepper}:{auth[7:]}".encode()).hexdigest()[:32]
+            return f"token:{digest}"
+        client = scope.get("client")
+        return f"ip:{client[0] if client else 'unknown'}"
+
+    if rate_limit_per_minute > 0:
+        app.add_middleware(
+            RateLimitMiddleware,
+            limiter=SlidingWindowRateLimiter(rate_limit_per_minute),
+            key_fn=rate_limit_key,
+            exempt_paths={"/", "/health"},
+        )
 
     def get_db():
         with SessionLocal() as db:
