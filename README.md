@@ -18,6 +18,7 @@ Space Memory is an open-source shared memory and workspace layer for AI agents. 
 - Cursor-based event catch-up after restart
 - Per-credential rate limiting (sliding window, `429` + `Retry-After`)
 - Lifecycle CLI (`space-memory start|stop|status|restart`) with PID + cmdline verification
+- Authenticated web panel: Space-key login, validated against the same Bearer contract, with explicit invalid/offline/empty states and logout
 - MCP Streamable HTTP tools:
   - `memory_remember`
   - `memory_search`
