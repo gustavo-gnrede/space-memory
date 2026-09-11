@@ -8,9 +8,14 @@ license = "MIT"
 dependencies = [
   "fastapi>=0.116,<1",
   "mcp>=1.20,<2",
+  "pydantic>=2.7,<3",
+  "python-dotenv>=1.0,<2",
   "sqlalchemy>=2.0,<3",
   "uvicorn>=0.35,<1",
 ]
+
+[project.scripts]
+space-memory = "space_memory.cli:main"
 
 [project.optional-dependencies]
 dev = [
