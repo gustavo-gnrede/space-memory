@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -13,11 +14,12 @@ from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create_engine, select, update
+from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, create_engine, event, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from .ratelimit import SlidingWindowRateLimiter
+from .vault import decrypt as vault_decrypt, encrypt as vault_encrypt, key_from_hex
 
 
 class Base(DeclarativeBase):
@@ -69,6 +71,40 @@ class Memory(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class Presence(Base):
+    __tablename__ = "presence"
+
+    space_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class VaultItem(Base):
+    __tablename__ = "vault_items"
+    __table_args__ = (UniqueConstraint("space_id", "key_name", name="uq_vault_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    space_id: Mapped[str] = mapped_column(String(128), index=True)
+    key_name: Mapped[str] = mapped_column(String(200))
+    value_blob: Mapped[str] = mapped_column(Text)
+    owner: Mapped[str] = mapped_column(String(128))
+    shared_with: Mapped[str] = mapped_column(Text, default="[]")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
+class VaultAudit(Base):
+    __tablename__ = "vault_audit"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    space_id: Mapped[str] = mapped_column(String(128), index=True)
+    agent_id: Mapped[str] = mapped_column(String(128))
+    action: Mapped[str] = mapped_column(String(20))
+    key_name: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
+
+
 class MemoryCreate(BaseModel):
     session_id: str = Field(min_length=1, max_length=128)
     content: str = Field(min_length=1, max_length=100_000)
@@ -82,6 +118,12 @@ class MemoryUpdate(BaseModel):
     session_id: str = Field(min_length=1, max_length=128)
     content: str = Field(min_length=1, max_length=100_000)
     base_version: int = Field(ge=1)
+
+
+class VaultSet(BaseModel):
+    key: str = Field(min_length=1, max_length=200)
+    value: str = Field(min_length=1, max_length=100_000)
+    shared_with: list[str] = Field(default_factory=list)
 
 
 def utcnow() -> datetime:
@@ -147,13 +189,29 @@ def create_app(
     *, database_url: str = "sqlite:///./space-memory.db", token_pepper: str,
     bootstrap_tokens: dict[str, dict[str, str]] | None = None,
     rate_limit_per_minute: int = 300,
+    vault_key: str | None = None,
 ) -> FastAPI:
     engine = create_engine(
         database_url,
         connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {},
     )
+    if database_url.startswith("sqlite"):
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragma(dbapi_conn, _connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.close()
     SessionLocal = sessionmaker(engine, expire_on_commit=False)
     Base.metadata.create_all(engine)
+
+    vault_key_bytes: bytes | None = None
+    if vault_key:
+        try:
+            vault_key_bytes = key_from_hex(vault_key)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
 
     def token_hash(token: str) -> str:
         return hashlib.sha256(f"{token_pepper}:{token}".encode()).hexdigest()
@@ -164,6 +222,18 @@ def create_app(
                 digest = token_hash(token)
                 if db.scalar(select(Credential).where(Credential.token_hash == digest)) is None:
                     db.add(Credential(token_hash=digest, **identity))
+
+    def _touch_presence(space_id: str, agent_id: str) -> None:
+        now = utcnow().replace(tzinfo=None)
+        with SessionLocal.begin() as pdb:
+            pdb.execute(
+                text(
+                    "INSERT INTO presence (space_id, agent_id, last_seen_at) "
+                    "VALUES (:space_id, :agent_id, :last_seen_at) "
+                    "ON CONFLICT (space_id, agent_id) DO UPDATE SET last_seen_at = :last_seen_at"
+                ),
+                {"space_id": space_id, "agent_id": agent_id, "last_seen_at": now},
+            )
 
     app = FastAPI(title="Space Memory", version="0.1.0")
 
@@ -199,6 +269,7 @@ def create_app(
         )
         if credential is None:
             raise HTTPException(status_code=401, detail="Invalid bearer token")
+        _touch_presence(credential.space_id, credential.agent_id)
         return credential
 
     @app.get("/")
@@ -420,6 +491,145 @@ def create_app(
         } for event in events]
         return {"items": items, "next_cursor": items[-1]["sequence"] if items else after}
 
+    @app.get("/api/v1/presence")
+    def list_presence(
+        credential: Credential = Depends(authenticate), db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        now = utcnow().replace(tzinfo=None)
+        cutoff = now - timedelta(minutes=5)
+        rows = list(db.scalars(
+            select(Presence).where(Presence.space_id == credential.space_id)
+        ))
+        agents = [
+            {
+                "agent_id": row.agent_id,
+                "last_seen_at": row.last_seen_at.isoformat(),
+                "online": row.last_seen_at >= cutoff,
+            }
+            for row in rows
+            if row.agent_id != credential.agent_id
+        ]
+        agents.sort(key=lambda a: (not a["online"], a["agent_id"]))
+        return {"agents": agents, "now": now.isoformat()}
+
+    @app.post("/api/v1/vault/items")
+    def vault_set(
+        payload: VaultSet, credential: Credential = Depends(authenticate),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        if vault_key_bytes is None:
+            raise HTTPException(status_code=503, detail="Vault not configured (set SPACE_MEMORY_VAULT_KEY)")
+        existing = db.scalar(select(VaultItem).where(
+            VaultItem.space_id == credential.space_id, VaultItem.key_name == payload.key,
+        ))
+        if existing is not None and existing.owner != credential.agent_id:
+            raise HTTPException(status_code=403, detail="Only the owner can update this secret")
+        now = utcnow().replace(tzinfo=None)
+        blob = vault_encrypt(vault_key_bytes, credential.space_id, payload.key, payload.value)
+        if existing is None:
+            db.add(VaultItem(
+                space_id=credential.space_id, key_name=payload.key, value_blob=blob,
+                owner=credential.agent_id, shared_with=json.dumps(payload.shared_with),
+                version=1, created_at=now, updated_at=now,
+            ))
+            version = 1
+        else:
+            existing.value_blob = blob
+            existing.shared_with = json.dumps(payload.shared_with)
+            existing.version += 1
+            existing.updated_at = now
+            version = existing.version
+        db.add(VaultAudit(
+            space_id=credential.space_id, agent_id=credential.agent_id,
+            action="set", key_name=payload.key, created_at=now,
+        ))
+        db.commit()
+        return {"key": payload.key, "version": version}
+
+    @app.get("/api/v1/vault/items")
+    def vault_list(
+        credential: Credential = Depends(authenticate), db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        if vault_key_bytes is None:
+            raise HTTPException(status_code=503, detail="Vault not configured (set SPACE_MEMORY_VAULT_KEY)")
+        rows = list(db.scalars(select(VaultItem).where(
+            VaultItem.space_id == credential.space_id,
+        ).order_by(VaultItem.updated_at.desc())))
+        items = []
+        for r in rows:
+            shared = json.loads(r.shared_with or "[]")
+            items.append({
+                "key": r.key_name, "owner": r.owner, "shared_with": shared,
+                "version": r.version, "updated_at": r.updated_at.isoformat(),
+                "can_read": r.owner == credential.agent_id or credential.agent_id in shared,
+            })
+        db.add(VaultAudit(
+            space_id=credential.space_id, agent_id=credential.agent_id,
+            action="list", key_name="*", created_at=utcnow().replace(tzinfo=None),
+        ))
+        db.commit()
+        return {"items": items, "total": len(items)}
+
+    @app.get("/api/v1/vault/items/{key_name:path}")
+    def vault_get(
+        key_name: str, credential: Credential = Depends(authenticate),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        if vault_key_bytes is None:
+            raise HTTPException(status_code=503, detail="Vault not configured (set SPACE_MEMORY_VAULT_KEY)")
+        item = db.scalar(select(VaultItem).where(
+            VaultItem.space_id == credential.space_id, VaultItem.key_name == key_name,
+        ))
+        if item is None:
+            raise HTTPException(status_code=404, detail="Secret not found")
+        shared = json.loads(item.shared_with or "[]")
+        if item.owner != credential.agent_id and credential.agent_id not in shared:
+            raise HTTPException(status_code=403, detail="Access denied")
+        value = vault_decrypt(vault_key_bytes, credential.space_id, key_name, item.value_blob)
+        db.add(VaultAudit(
+            space_id=credential.space_id, agent_id=credential.agent_id,
+            action="get", key_name=key_name, created_at=utcnow().replace(tzinfo=None),
+        ))
+        db.commit()
+        return {"key": key_name, "value": value, "owner": item.owner, "version": item.version}
+
+    @app.delete("/api/v1/vault/items/{key_name:path}")
+    def vault_delete(
+        key_name: str, credential: Credential = Depends(authenticate),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        if vault_key_bytes is None:
+            raise HTTPException(status_code=503, detail="Vault not configured (set SPACE_MEMORY_VAULT_KEY)")
+        item = db.scalar(select(VaultItem).where(
+            VaultItem.space_id == credential.space_id, VaultItem.key_name == key_name,
+        ))
+        if item is None:
+            raise HTTPException(status_code=404, detail="Secret not found")
+        if item.owner != credential.agent_id:
+            raise HTTPException(status_code=403, detail="Only the owner can delete this secret")
+        db.delete(item)
+        db.add(VaultAudit(
+            space_id=credential.space_id, agent_id=credential.agent_id,
+            action="delete", key_name=key_name, created_at=utcnow().replace(tzinfo=None),
+        ))
+        db.commit()
+        return {"deleted": key_name}
+
+    @app.get("/api/v1/vault/audit")
+    def vault_audit(
+        limit: int = Query(default=100, ge=1, le=500),
+        credential: Credential = Depends(authenticate), db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        if vault_key_bytes is None:
+            raise HTTPException(status_code=503, detail="Vault not configured (set SPACE_MEMORY_VAULT_KEY)")
+        rows = list(db.scalars(select(VaultAudit).where(
+            VaultAudit.space_id == credential.space_id,
+        ).order_by(VaultAudit.id.desc()).limit(limit)))
+        return {"items": [
+            {"agent_id": r.agent_id, "action": r.action, "key": r.key_name, "at": r.created_at.isoformat()}
+            for r in rows
+        ], "total": len(rows)}
+
     class SpaceTokenVerifier:
         async def verify_token(self, token: str) -> AccessToken | None:
             with SessionLocal() as db:
@@ -428,6 +638,7 @@ def create_app(
                 )
                 if credential is None:
                     return None
+                _touch_presence(credential.space_id, credential.agent_id)
                 return AccessToken(
                     token=token,
                     client_id=credential.agent_id,
@@ -557,6 +768,105 @@ def create_app(
                       "aggregate_id": e.aggregate_id, "aggregate_version": e.aggregate_version}
                      for e in events]
             return {"items": items, "next_cursor": items[-1]["sequence"] if items else cursor}
+
+    @mcp.tool(name="vault_set", description="Encrypt and store a secret (password, token) in the vault. Owner-only update/delete; optionally shared read-only.")
+    def mcp_vault_set(key: str, value: str, shared_with: list[str] | None = None) -> dict[str, Any]:
+        space_id, agent_id = mcp_identity()
+        if vault_key_bytes is None:
+            raise ValueError("Vault not configured: set SPACE_MEMORY_VAULT_KEY")
+        shared = shared_with or []
+        now = utcnow().replace(tzinfo=None)
+        blob = vault_encrypt(vault_key_bytes, space_id, key, value)
+        with SessionLocal() as db:
+            existing = db.scalar(select(VaultItem).where(
+                VaultItem.space_id == space_id, VaultItem.key_name == key,
+            ))
+            if existing is not None and existing.owner != agent_id:
+                raise PermissionError(f"Secret '{key}' is owned by {existing.owner}")
+            if existing is None:
+                db.add(VaultItem(
+                    space_id=space_id, key_name=key, value_blob=blob, owner=agent_id,
+                    shared_with=json.dumps(shared), version=1, created_at=now, updated_at=now,
+                ))
+                version = 1
+            else:
+                existing.value_blob = blob
+                existing.shared_with = json.dumps(shared)
+                existing.version += 1
+                existing.updated_at = now
+                version = existing.version
+            db.add(VaultAudit(
+                space_id=space_id, agent_id=agent_id, action="set", key_name=key, created_at=now,
+            ))
+            db.commit()
+        return {"key": key, "version": version}
+
+    @mcp.tool(name="vault_get", description="Decrypt and read a secret from the vault.")
+    def mcp_vault_get(key: str) -> dict[str, Any]:
+        space_id, agent_id = mcp_identity()
+        if vault_key_bytes is None:
+            raise ValueError("Vault not configured: set SPACE_MEMORY_VAULT_KEY")
+        with SessionLocal() as db:
+            item = db.scalar(select(VaultItem).where(
+                VaultItem.space_id == space_id, VaultItem.key_name == key,
+            ))
+            if item is None:
+                raise KeyError(f"Secret '{key}' not found")
+            shared = json.loads(item.shared_with or "[]")
+            if item.owner != agent_id and agent_id not in shared:
+                raise PermissionError(f"Access denied to secret '{key}'")
+            value = vault_decrypt(vault_key_bytes, space_id, key, item.value_blob)
+            db.add(VaultAudit(
+                space_id=space_id, agent_id=agent_id, action="get", key_name=key,
+                created_at=utcnow().replace(tzinfo=None),
+            ))
+            db.commit()
+        return {"key": key, "value": value, "owner": item.owner, "version": item.version}
+
+    @mcp.tool(name="vault_list", description="List vault keys and metadata (never the secret values).")
+    def mcp_vault_list() -> dict[str, Any]:
+        space_id, agent_id = mcp_identity()
+        if vault_key_bytes is None:
+            raise ValueError("Vault not configured: set SPACE_MEMORY_VAULT_KEY")
+        with SessionLocal() as db:
+            rows = list(db.scalars(select(VaultItem).where(
+                VaultItem.space_id == space_id,
+            ).order_by(VaultItem.updated_at.desc())))
+            items = []
+            for r in rows:
+                shared = json.loads(r.shared_with or "[]")
+                items.append({
+                    "key": r.key_name, "owner": r.owner, "shared_with": shared,
+                    "version": r.version,
+                    "can_read": r.owner == agent_id or agent_id in shared,
+                })
+            db.add(VaultAudit(
+                space_id=space_id, agent_id=agent_id, action="list", key_name="*",
+                created_at=utcnow().replace(tzinfo=None),
+            ))
+            db.commit()
+        return {"items": items, "total": len(items)}
+
+    @mcp.tool(name="vault_delete", description="Delete a secret from the vault (owner only).")
+    def mcp_vault_delete(key: str) -> dict[str, Any]:
+        space_id, agent_id = mcp_identity()
+        if vault_key_bytes is None:
+            raise ValueError("Vault not configured: set SPACE_MEMORY_VAULT_KEY")
+        with SessionLocal() as db:
+            item = db.scalar(select(VaultItem).where(
+                VaultItem.space_id == space_id, VaultItem.key_name == key,
+            ))
+            if item is None:
+                raise KeyError(f"Secret '{key}' not found")
+            if item.owner != agent_id:
+                raise PermissionError(f"Only the owner can delete secret '{key}'")
+            db.delete(item)
+            db.add(VaultAudit(
+                space_id=space_id, agent_id=agent_id, action="delete", key_name=key,
+                created_at=utcnow().replace(tzinfo=None),
+            ))
+            db.commit()
+        return {"deleted": key}
 
     mcp_app = mcp.streamable_http_app()
     app.mount("/mcp", mcp_app)
