@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#17143f">
+  <title>Space Memory</title>
+  <style>
+    :root{--ink:#17143f;--violet:#6d4aff;--cyan:#50dcff;--mint:#67f0b2;--gold:#ffcb57;--paper:#f5f2ff;--card:#fff;--muted:#665f86;--shadow:0 18px 45px rgba(0,0,0,.16)}
+    *{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at 50% -20%,#e2dbff 0,#f5f2ff 42%,#ece9f7 100%);color:var(--ink);font-family:"Trebuchet MS",Aptos,system-ui,sans-serif;min-height:100vh}
+    button{font:inherit}.shell{min-height:100vh;display:grid;grid-template-rows:auto 1fr}.topbar{display:flex;align-items:center;justify-content:space-between;padding:18px clamp(18px,4vw,56px);background:#17143f;color:white;box-shadow:0 8px 24px rgba(0,0,0,.2)}
+    .brand{display:flex;align-items:center;gap:12px;font-weight:900;letter-spacing:-.02em;font-size:1.2rem}.cube{width:34px;height:34px;display:grid;place-items:center;background:var(--violet);border-radius:10px;box-shadow:inset 0 -5px 0 rgba(0,0,0,.16),0 5px 12px rgba(0,0,0,.25)}
+    .status{display:flex;align-items:center;gap:8px;font-weight:800;font-size:.85rem}.dot{width:10px;height:10px;border-radius:50%;background:var(--mint);box-shadow:0 3px 8px rgba(0,0,0,.28)}
+    main{display:grid;grid-template-columns:minmax(190px,250px) minmax(360px,1fr) minmax(220px,300px);gap:20px;padding:22px clamp(14px,3vw,38px);max-width:1600px;width:100%;margin:auto}
+    .panel{background:rgba(255,255,255,.88);border-radius:16px;box-shadow:var(--shadow);padding:18px}.panel h2{font-size:.8rem;letter-spacing:.14em;text-transform:uppercase;margin:0 0 16px;color:var(--muted)}
+    .agent{display:grid;grid-template-columns:42px 1fr auto;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #e8e3f5}.agent:last-child{border:0}.avatar{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;color:#fff;font-weight:900;background:var(--violet);box-shadow:inset 0 -5px 0 rgba(0,0,0,.14)}.agent:nth-child(3) .avatar{background:#ff7b54}.agent:nth-child(4) .avatar{background:#2cb9c5}
+    .agent strong{display:block}.agent small{color:var(--muted)}.signal{width:9px;height:9px;border-radius:50%;background:var(--mint)}
+    .world{position:relative;min-height:620px;border-radius:22px;overflow:hidden;background:linear-gradient(160deg,#251d67,#111033 70%);box-shadow:0 22px 55px rgba(0,0,0,.3);isolation:isolate}.world:before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 50% 45%,rgba(109,74,255,.38),transparent 38%);z-index:-1}.world-head{position:absolute;z-index:2;top:22px;left:24px;color:#fff}.world-head h1{margin:0;font-size:clamp(1.8rem,4vw,3.5rem);letter-spacing:-.04em}.world-head p{margin:8px 0;color:#cfc8ff;max-width:42ch}
+    #brain-canvas{width:100%;height:100%;display:block;min-height:620px}.metric{position:absolute;bottom:20px;left:20px;right:20px;display:flex;justify-content:space-between;gap:12px;background:rgba(255,255,255,.94);padding:14px 18px;border-radius:14px;box-shadow:0 10px 28px rgba(0,0,0,.18)}.metric strong{font-size:1.15rem}.metric span{display:block;color:var(--muted);font-size:.78rem}
+    #activity-list{list-style:none;margin:0;padding:0}.activity{display:grid;grid-template-columns:12px 1fr;gap:10px;padding:12px 0;border-bottom:1px solid #e8e3f5}.activity:last-child{border:0}.activity i{width:10px;height:10px;border-radius:4px;background:var(--violet);margin-top:5px}.activity strong{display:block;font-size:.9rem}.activity time,.activity small{color:var(--muted);font-size:.76rem}.empty{color:var(--muted);line-height:1.5}
+    .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    *:focus-visible{outline:3px solid var(--gold);outline-offset:3px}::selection{background:var(--gold);color:var(--ink)}
+    @media(max-width:980px){main{grid-template-columns:1fr 1fr}.world{grid-column:1/-1;grid-row:1}.world,#brain-canvas{min-height:560px}}
+    @media(max-width:640px){main{grid-template-columns:1fr}.world{min-height:520px}.world-head h1{font-size:2rem}.metric{display:grid;grid-template-columns:1fr 1fr}.topbar{padding:14px 16px}.panel{padding:15px}}
+    @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+  </style>
+</head>
+<body>
+<!--
+THESIS: The Space itself is the interface; confirmed knowledge grows as a living brain instead of hiding behind dashboard cards.
+OWN-WORLD: Sculpted game-console forms, violet volume, cyan neural energy, white operational panels, and chunky original agent avatars.
+STORY: See memory alive, identify who feeds or consumes it, then inspect attributable events.
+FIRST VIEWPORT: A large central living brain owns the viewport, flanked by agents and an accessible event feed; status remains readable at every size.
+FORM: Living neural observatory, grounded direction 6, seed 510d8c7b.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+-->
+<div class="shell">
+  <header class="topbar"><div class="brand"><span class="cube" aria-hidden="true">S</span>SPACE MEMORY</div><div class="status"><span class="dot"></span>MEMÓRIA ATIVA</div></header>
+  <main>
+    <aside class="panel"><h2>Agentes conectados</h2><div id="agents"><p class="empty">Conecte usando uma chave deste Space.</p></div></aside>
+    <section class="world" aria-labelledby="space-title">
+      <div class="world-head"><h1 id="space-title">Cérebro vivo</h1><p>Cada conexão nasce de um evento realmente persistido.</p></div>
+      <canvas id="brain-canvas" role="img" aria-label="Visualização neural das memórias confirmadas do Space"></canvas>
+      <p id="brain-summary" class="sr-only" aria-live="polite">Nenhuma memória carregada.</p>
+      <div class="metric"><div><strong id="memory-count">0</strong><span>memórias</span></div><div><strong id="connection-count">0</strong><span>conexões</span></div><div><strong id="sync-state">aguardando</strong><span>último evento</span></div></div>
+    </section>
+    <aside class="panel"><h2>Atividade confirmada</h2><ol id="activity-list"><li class="empty">Aguardando o primeiro agente alimentar este Space.</li></ol></aside>
+  </main>
+</div>
+<script>
+(() => {
+  const canvas=document.getElementById('brain-canvas'),ctx=canvas.getContext('2d');
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let w=0,h=0,t=0,nodes=[];
+  function seed(count=18){nodes=[];for(let i=0;i<count;i++){const a=i*.92,r=45+(i%6)*18;nodes.push({x:Math.cos(a)*r,y:Math.sin(a)*r*.72,size:4+(i%4),phase:i*.7});}}
+  function resize(){const r=canvas.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,2);w=r.width;h=r.height;canvas.width=w*d;canvas.height=h*d;ctx.setTransform(d,0,0,d,0,0);draw();}
+  function draw(){ctx.clearRect(0,0,w,h);const cx=w/2,cy=h*.52;ctx.save();ctx.translate(cx,cy);ctx.lineCap='round';for(let i=1;i<nodes.length;i++){const a=nodes[i],b=nodes[Math.floor(i*.58)];ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.quadraticCurveTo((a.x+b.x)*.35,(a.y+b.y)*.62,b.x,b.y);ctx.strokeStyle=`rgba(80,220,255,${.16+(i%4)*.055})`;ctx.lineWidth=1.2+(i%3);ctx.stroke();}for(const n of nodes){const pulse=reduced?1:1+Math.sin(t*.002+n.phase)*.13;const g=ctx.createRadialGradient(n.x,n.y,0,n.x,n.y,n.size*4);g.addColorStop(0,'rgba(255,255,255,.98)');g.addColorStop(.28,'rgba(80,220,255,.9)');g.addColorStop(1,'rgba(109,74,255,0)');ctx.fillStyle=g;ctx.beginPath();ctx.arc(n.x,n.y,n.size*4*pulse,0,Math.PI*2);ctx.fill();}ctx.restore();if(!reduced){t=performance.now();requestAnimationFrame(draw);}}
+  seed();new ResizeObserver(resize).observe(canvas);if(!reduced)requestAnimationFrame(draw);
+  fetch('/api/v1/events?after=0',{headers:{Authorization:'Bearer '+(sessionStorage.getItem('spaceMemoryToken')||'')}}).then(r=>r.ok?r.json():null).then(data=>{if(!data)return;const items=data.items||[];document.getElementById('memory-count').textContent=new Set(items.map(x=>x.aggregate_id)).size;document.getElementById('connection-count').textContent=items.length;document.getElementById('sync-state').textContent=items.length?'agora':'aguardando';document.getElementById('brain-summary').textContent=`${items.length} eventos confirmados no Space.`;if(items.length){document.getElementById('activity-list').innerHTML=items.slice(-8).reverse().map(e=>`<li class="activity"><i></i><div><strong>${e.type.replace('.',' ')}</strong><small>${e.agent_id} · versão ${e.aggregate_version}</small></div></li>`).join('');seed(Math.min(64,18+items.length));}}).catch(()=>{});
+})();
+</script>
+</body>
+</html>
